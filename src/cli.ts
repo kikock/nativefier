@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
-
-import electronPackager = require('electron-packager');
 import * as log from 'loglevel';
 import yargs from 'yargs';
+import * as fs from 'fs';
+import * as path from 'path';
 
 import { DEFAULT_ELECTRON_VERSION } from './constants';
 import {
@@ -16,6 +16,7 @@ import { supportedArchs, supportedPlatforms } from './infer/inferOs';
 import { buildNativefierApp } from './main';
 import { RawOptions } from '../shared/src/options/model';
 import { parseJson } from './utils/parseUtils';
+import electronPackager = require('electron-packager');
 
 // @types/yargs@17.x started pretending yargs.argv can be a promise:
 // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/8e17f9ca957a06040badb53ae7688fbb74229ccf/types/yargs/index.d.ts#L73
@@ -35,7 +36,7 @@ export function initArgs(argv: string[]): yargs.Argv<RawOptions> {
   const args = yargs(sanitizedArgs)
     .scriptName('nativefier')
     .usage(
-      '$0 <targetUrl> [outputDirectory] [other options]\nor\n$0 --upgrade <pathToExistingApp> [other options]',
+      '$0 <targetUrl> [outputDirectory] [other options]\nor\n$0 --upgrade <pathToExistingApp> [other options]\nor\n$0 --config <configFile> [other options]',
     )
     .example(
       '$0 <targetUrl> -n <name>',
@@ -50,15 +51,19 @@ export function initArgs(argv: string[]): yargs.Argv<RawOptions> {
       'Make an app from <targetUrl> for the OS <platform> and CPU architecture <arch>',
     )
     .example(
+      '$0 --config config.json',
+      'Make an app using options defined in config.json',
+    )
+    .example(
       'for more examples and help...',
       'See https://github.com/nativefier/nativefier/blob/master/CATALOG.md',
     )
-    .positional('targetUrl', {
+    .positional('url', {
       description:
         'the URL that you wish to to turn into a native app; required if not using --upgrade',
       type: 'string',
     })
-    .positional('outputDirectory', {
+    .positional('out', {
       defaultDescription:
         'defaults to the current directory, or env. var. NATIVEFIER_APPS_DIR if set',
       description: 'the directory to generate the app in',
@@ -66,6 +71,23 @@ export function initArgs(argv: string[]): yargs.Argv<RawOptions> {
       type: 'string',
     })
     // App Creation Options
+    .option('targetUrl', {
+      description:
+        'the URL that you wish to to turn into a native app; required if not using --upgrade',
+      type: 'string',
+    })
+    .option('outputDirectory', {
+      description:
+        'defaults to the current directory, or env. var. NATIVEFIER_APPS_DIR if set',
+      type: 'string',
+    })
+
+    .option('config', {
+      alias: 'cfg',
+      description: 'path to JSON config file',
+      normalize: true,
+      type: 'string',
+    })
     .option('a', {
       alias: 'arch',
       choices: supportedArchs,
@@ -142,6 +164,9 @@ export function initArgs(argv: string[]): yargs.Argv<RawOptions> {
     })
     .group(
       [
+        'url',
+        'out',
+        'config',
         'arch',
         'conceal',
         'electron-version',
@@ -557,11 +582,77 @@ function decorateYargOptionGroup(value: string): string {
 
 export function parseArgs(args: yargs.Argv<RawOptions>): RawOptions {
   const parsed = { ...(args.argv as YargsArgvSync<RawOptions>) };
+  // 如果提供了配置文件，加载配置
+
+  if (parsed.config) {
+    try {
+      if (typeof parsed.config !== 'string') {
+        throw new Error('Config path must be a string.');
+      }
+      const configPath = path.resolve(parsed.config);
+      if (fs.existsSync(configPath)) {
+        const configFileContent = fs.readFileSync(configPath, 'utf8');
+        const config = JSON.parse(configFileContent);
+
+        // 定义参数别名字典，使用正确的 Map 类型
+        const aliasMap = new Map<string, string>([
+          ['url', 'targetUrl'],
+          ['out', 'out'],
+        ]);
+
+        // 将配置文件中的选项合并到 parsed 对象中
+        for (const [key, value] of Object.entries(config)) {
+          // 处理别名映射
+          const actualKey = aliasMap.get(key) || key;
+          // 只有当命令行没有设置该选项时才使用配置文件中的值
+          if (
+            parsed[actualKey as keyof RawOptions] === undefined ||
+            (typeof parsed[actualKey as keyof RawOptions] === 'boolean' &&
+              parsed[actualKey as keyof RawOptions] === false &&
+              value !== false)
+          ) {
+            parsed[actualKey as keyof RawOptions] = value as never;
+          }
+        }
+      } else {
+        throw new Error(`Config file not found: ${configPath}`);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Failed to load config file: ${error.message}`);
+      } else {
+        throw new Error(`Failed to load config file: ${String(error)}`);
+      }
+    }
+  }
+
+  // 特殊处理 tray 参数，确保其值是有效的选项之一
+  // 处理 myTray 配置并设置 tray 参数
+  if (parsed.myTray !== undefined) {
+    const validTrayValues = ['true', 'false', 'start-in-tray'];
+    if (validTrayValues.includes(parsed.myTray)) {
+      // 如果 myTray 值有效，则设置 tray 参数
+      parsed.tray = parsed.myTray;
+    } else {
+      // 如果 myTray 值无效，使用默认值 'false'
+      parsed.tray = 'false';
+      log.error(`Invalid myTray value '${parsed.myTray}' provided. Using default value 'false'. Valid values are: ${validTrayValues.join(', ')}`);
+    }
+    // 移除 myTray 属性，避免混淆
+    delete parsed.myTray;
+  }
+
+
+
   // In yargs, the _ property of the parsed args is an array of the positional args
   // https://github.com/yargs/yargs/blob/master/docs/examples.md#and-non-hyphenated-options-too-just-use-argv_
   // So try to extract the targetUrl and outputDirectory from these
-  parsed.targetUrl = parsed._.length > 0 ? parsed._[0].toString() : undefined;
-  parsed.out = parsed._.length > 1 ? (parsed._[1] as string) : undefined;
+  if (!parsed.targetUrl) {
+    parsed.targetUrl = parsed._.length > 0 ? parsed._[0].toString() : undefined;
+  }
+  if (!parsed.out) {
+    parsed.out = parsed._.length > 1 ? (parsed._[1] as string) : undefined;
+  }
 
   if (parsed.upgrade && parsed.targetUrl) {
     let targetAndUpgrade = false;
@@ -588,7 +679,7 @@ export function parseArgs(args: yargs.Argv<RawOptions>): RawOptions {
     }
   }
 
-  if (!parsed.targetUrl && !parsed.upgrade) {
+  if (!parsed.targetUrl && !parsed.upgrade && !parsed.config) {
     throw new Error(
       'ERROR: Nativefier must be called with either a targetUrl or the --upgrade option.\n',
     );
