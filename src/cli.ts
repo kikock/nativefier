@@ -630,8 +630,10 @@ export function parseArgs(args: yargs.Argv<RawOptions>): RawOptions {
   // 处理 myTray 配置并设置 tray 参数
   if (parsed.myTray !== undefined) {
     const validTrayValues = ['true', 'false', 'start-in-tray'];
+    // @ts-ignore
     if (validTrayValues.includes(parsed.myTray)) {
       // 如果 myTray 值有效，则设置 tray 参数
+      // @ts-ignore
       parsed.tray = parsed.myTray;
     } else {
       // 如果 myTray 值无效，使用默认值 'false'
